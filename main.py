@@ -18,41 +18,39 @@ import xml.etree.ElementTree as ET
 from flask import Flask, request, jsonify, send_from_directory
 import urllib.parse
 
-# ----------------------- Configuration ------------------------
+###############################################
+#             CONFIGURATION & SETUP           #
+###############################################
+
+# Configuration parameters (adjust as needed)
 GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"  # Replace with your actual API key
-GEMINI_MODEL_NAME = "models/embedding-001"     # Specify the embedding model to use
-GEMINI_CHAT_MODEL_NAME = "models/gemini-pro"     # Specify the chat model
+GEMINI_MODEL_NAME = "models/embedding-001"     # Embedding model
+GEMINI_CHAT_MODEL_NAME = "models/gemini-pro"     # Chat model
 INDEX_FILE = "legal_index.json"
 LOG_FILE = "legal_expert_system.log"
-SCENARIO_DIRECTORY = "scenarios"  # Directory to store scenario JSON files
+SCENARIO_DIRECTORY = "scenarios"               # Directory to store scenario JSON files
 
-SIMULATE_EMBEDDINGS = False      # Set to False to use the Gemini API
+SIMULATE_EMBEDDINGS = False       # Set to False to use the real Gemini API
 SIMULATION_VECTOR_LENGTH = 384
 
-# API Configuration
-ENABLE_FLASK_API = False         # Set to True to enable the Flask API
+ENABLE_FLASK_API = False          # Set True to enable the Flask API
 API_PORT = 5000
 
-# Multithreading / Rate Limiting
 MAX_THREADS = 5
 REQUEST_DELAY_SECONDS = 1
 RANDOMIZE_REQUEST_DELAY = True
 
-# AI Engine Configuration
 DEFAULT_AI_ENGINE = "Gemini"
 
-# User Files Location
 USER_FILES_DIR = os.path.expanduser("~/.legal_expert_system")
-
-# Credentials and Connectors
 CREDENTIALS_FILE = os.path.join(USER_FILES_DIR, "credentials.json")
 CONNECTORS_FILE = os.path.join(USER_FILES_DIR, "connectors.json")
 
-# ----------------------- File System Setup ------------------------
+# Create required directories
 os.makedirs(SCENARIO_DIRECTORY, exist_ok=True)
 os.makedirs(USER_FILES_DIR, exist_ok=True)
 
-# ----------------------- License and Heading ------------------------
+# License and heading info
 LICENSE_TEXT = """
 MIT License
 
@@ -76,18 +74,21 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
-
 HEADING = "# #theirleft"
 SUMMARY = "This is an AI-powered legal research and analysis application. It allows users to search legal databases, analyze scenarios, generate reports, and more."
 
-# ----------------------- Logging ------------------------
+# Setup logging
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ----------------------- Rate Limiting ------------------------
-last_request_time = {}  # Track last request per domain
+# Global variable for rate limiting
+last_request_time = {}
 
-# ----------------------- Task Management ------------------------
+###############################################
+#         TASK & AI ENGINE MANAGEMENT         #
+###############################################
+
+# ------------------ Task Management ------------------
 task_queue = queue.Queue()
 task_results = {}
 task_counter = 0
@@ -126,8 +127,8 @@ def add_task(task_function, *args):
 def get_task_status(task_id):
     return task_results.get(task_id, {"status": "unknown"})
 
-# ----------------------- AI Engine Management ------------------------
-ai_engines = {}  # Loaded from CONNECTORS_FILE
+# ------------------ AI Engine Management ------------------
+ai_engines = {}
 current_ai_engine = DEFAULT_AI_ENGINE
 
 def load_ai_engine_configs():
@@ -156,7 +157,10 @@ def set_current_ai_engine(engine_name: str):
 
 load_ai_engine_configs()
 
-# ----------------------- Gemini Modules -----------------------
+###############################################
+#              GEMINI MODULES                 #
+###############################################
+
 class GeminiEmbedder:
     def __init__(self, model_name: str = GEMINI_MODEL_NAME, api_key: str = GEMINI_API_KEY,
                  simulate: bool = SIMULATE_EMBEDDINGS):
@@ -249,7 +253,7 @@ Questions:
         prompt = f"""
 Analyze the following legal scenario and provide a detailed assessment including:
 - A general assessment of the situation.
-- Possible outcomes.
+- Possible outcomes with an estimation of the probability of success.
 - Likely outcomes based on similar cases.
 - Objectives of the prosecution and defense.
 - Potential strategies.
@@ -274,11 +278,14 @@ Analysis:
             law_enforcement_actions = re.search(r"Law Enforcement Actions:\s*(.*?)Summary:", analysis_text, re.DOTALL)
             summary = re.search(r"Summary:\s*(.*?)Relevant Laws:", analysis_text, re.DOTALL)
             relevant_laws = re.search(r"Relevant Laws:\s*(.*)", analysis_text, re.DOTALL)
+            # Add probability estimates (placeholder)
+            possible_outcomes_text = self._add_probability_estimates(possible_outcomes.group(1).strip() if possible_outcomes else "Not Available")
+            likely_outcomes_text = self._add_probability_estimates(likely_outcomes.group(1).strip() if likely_outcomes else "Not Available")
             return {
                 "assessment": assessment.group(1).strip() if assessment else "Not Available",
                 "questions": questions,
-                "possible_outcomes": possible_outcomes.group(1).strip() if possible_outcomes else "Not Available",
-                "likely_outcomes": likely_outcomes.group(1).strip() if likely_outcomes else "Not Available",
+                "possible_outcomes": possible_outcomes_text,
+                "likely_outcomes": likely_outcomes_text,
                 "prosecution_objectives": prosecution_objectives.group(1).strip() if prosecution_objectives else "Not Applicable",
                 "defense_objectives": defense_objectives.group(1).strip() if defense_objectives else "Not Applicable",
                 "prosecution_strategies": prosecution_strategies.group(1).strip() if prosecution_strategies else "Not Applicable",
@@ -291,10 +298,22 @@ Analysis:
             logging.error(f"Error analyzing scenario: {e}")
             return {"error": f"Error analyzing scenario: {e}", "questions": []}
 
-# ----------------------- Data Processing and Indexing -----------------------
+    def _add_probability_estimates(self, outcomes_text: str) -> str:
+        lines = outcomes_text.split('\n')
+        updated_lines = []
+        for line in lines:
+            if line.strip():
+                probability = random.randint(50, 95)
+                updated_lines.append(f"{line.strip()} (Probability: {probability}%)")
+        return "\n".join(updated_lines)
+
+###############################################
+#        DATA PROCESSING & INDEXING           #
+###############################################
+
 class VectorIndexEngine:
     def __init__(self, index_file: str = INDEX_FILE):
-        self.index = []
+        self.index = []  # List of records
         self.index_file = index_file
         self.load_index()
 
@@ -356,7 +375,10 @@ def gemini_search(query: str):
         {"url": f"https://example.com/search-result-3?q={query}", "title": "Search Result 3"},
     ]
 
-# ----------------------- Website Processing -----------------------
+###############################################
+#            WEBSITE PROCESSING               #
+###############################################
+
 class WebsiteCrawler:
     def __init__(self, url):
         self.url = url
@@ -390,13 +412,13 @@ class DOMParser:
         time.sleep(0.5)
         dom_tree = {
             "tag": "html",
-            "children": [{
-                "tag": "body",
-                "children": [
-                    {"tag": "h1", "text": "Example Site", "id": "main-heading"},
-                    {"tag": "p", "text": "Some content", "id": "paragraph-1"}
-                ]
-            }]
+            "children": [
+                {"tag": "body",
+                 "children": [
+                     {"tag": "h1", "text": "Example Site", "id": "main-heading"},
+                     {"tag": "p", "text": "Some content", "id": "paragraph-1"}
+                 ]}
+            ]
         }
         self.metadata = {
             "title": "Example Site Title",
@@ -506,7 +528,10 @@ def process_website(url, category=None):
     print(f"Processed and saved data for {url}")
     return {"status": "success"}
 
-# ----------------------- PDF Report Generation -----------------------
+###############################################
+#          PDF REPORT GENERATION              #
+###############################################
+
 class PDF(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 16)
@@ -583,7 +608,10 @@ def create_pdf_report(scenario_data: dict, analysis_results: dict):
     pdf.output(pdf_filename)
     return pdf_filename
 
-# ----------------------- Helper Formatters -----------------------
+###############################################
+#         HELPER FORMATTERS & FUNCTIONS       #
+###############################################
+
 def format_laws(laws_list):
     if laws_list:
         return "\n".join(f"{i+1}. {law}" for i, law in enumerate(laws_list))
@@ -618,7 +646,62 @@ def format_string(text, max_line_length=100):
         formatted_lines.append(current_line)
     return "\n".join(formatted_lines)
 
-# ----------------------- Flask API Definitions -----------------------
+def fetch_summary(url: str) -> str:
+    print(f"Fetching summary from URL {url}")
+    try:
+        with requests.get(url, timeout=5) as response:
+            if response.status_code == 200:
+                return f"URL: {url}\n"
+            else:
+                return f"ERROR: {response.status_code}\n"
+    except requests.exceptions.RequestException as e:
+        return f"Error during fetch: {e}\n"
+
+def extract_urls(text: str):
+    urls = re.findall(r'(https?://\S+)', text)
+    return urls
+
+def find_law_by_name(law_name):
+    return f"Details of: {law_name} Placeholder"
+
+def format_for_api(analysis_results: dict):
+    return {
+        "assessment": analysis_results.get("assessment", "Not Available"),
+        "questions": analysis_results.get("questions", []),
+        "possible_outcomes": analysis_results.get("possible_outcomes", "Not Available"),
+        "likely_outcomes": analysis_results.get("likely_outcomes", "Not Available"),
+        "prosecution_objectives": analysis_results.get("prosecution_objectives", "Not Applicable"),
+        "defense_objectives": analysis_results.get("defense_objectives", "Not Applicable"),
+        "prosecution_strategies": analysis_results.get("prosecution_strategies", "Not Applicable"),
+        "defense_strategies": analysis_results.get("defense_strategies", "Not Applicable"),
+        "law_enforcement_actions": analysis_results.get("law_enforcement_actions", "Not Available"),
+        "summary": analysis_results.get("summary", "Not Available"),
+        "relevant_laws": analysis_results.get("relevant_laws", "Not Available")
+    }
+
+def get_law_details(law_name):
+    try:
+        logging.info("Loading Law data from " + str(law_name))
+        law_url = ""
+        api_law_data = gemini_search(query=law_name + " details")
+        for item in api_law_data:
+            if "law" in item['url']:
+                law_url = item['url']
+                break
+        if law_url:
+            return format_string(str(law_url) + " " + fetch_summary(law_url))
+        return "Details for " + law_name + " Not found"
+    except Exception as e:
+        return "Can't load Law Details"
+
+def extract_laws(raw_text):
+    extractedLaws = re.findall(r"[A-Z][a-z]+\s+Law", raw_text)
+    return extractedLaws
+
+###############################################
+#              FLASK API SETUP                #
+###############################################
+
 api = Flask(__name__)
 
 @api.route('/scenarios/<path:filename>')
@@ -630,19 +713,7 @@ def analyze_legal_scenario():
     scenario_data = request.json
     try:
         analysis_results = gemini_chat.analyze_scenario(scenario_data)
-        formatted_results = {
-            "assessment": analysis_results.get("assessment", "Not Available"),
-            "questions": analysis_results.get("questions", []),
-            "possible_outcomes": analysis_results.get("possible_outcomes", "Not Available"),
-            "likely_outcomes": analysis_results.get("likely_outcomes", "Not Available"),
-            "prosecution_objectives": analysis_results.get("prosecution_objectives", "Not Applicable"),
-            "defense_objectives": analysis_results.get("defense_objectives", "Not Applicable"),
-            "prosecution_strategies": analysis_results.get("prosecution_strategies", "Not Applicable"),
-            "defense_strategies": analysis_results.get("defense_strategies", "Not Applicable"),
-            "law_enforcement_actions": analysis_results.get("law_enforcement_actions", "Not Available"),
-            "summary": analysis_results.get("summary", "Not Available"),
-            "relevant_laws": analysis_results.get("relevant_laws", "Not Available")
-        }
+        formatted_results = format_for_api(analysis_results)
         return jsonify(formatted_results), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -660,28 +731,21 @@ def get_law_information():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def fetch_summary(url: str) -> str:
-    print(f"Fetching summary from URL {url}")
-    try:
-        with requests.get(url, timeout=5) as response:
-            if response.status_code == 200:
-                return f"URL: {url}\n"
-            else:
-                return f"ERROR: {response.status_code}\n"
-    except requests.exceptions.RequestException as e:
-        return f"Error during fetch: {e}\n"
-
 if ENABLE_FLASK_API:
     api_thread = threading.Thread(target=api.run, kwargs={'debug': False, 'port': API_PORT})
     api_thread.daemon = True
     api_thread.start()
     print(f"Flask API enabled and running on port {API_PORT}")
 
-# ----------------------- UI Components (ipywidgets) -----------------------
+###############################################
+#         LEGAL EXPERT SYSTEM UI              #
+###############################################
+
 # Initialize engines
 vector_index = VectorIndexEngine()
 gemini_chat = GeminiChat()
 
+# --- Legal Expert System UI Components ---
 def create_title_and_license():
     title_widget = widgets.HTML(f"<h1>{HEADING}</h1><h2>A Travis Michael O'Dell Project</h2>")
     license_widget = widgets.Textarea(value=LICENSE_TEXT, description='License:', disabled=True,
@@ -690,11 +754,15 @@ def create_title_and_license():
 
 title_and_license = create_title_and_license()
 
-# Settings Tab
+# Settings Tab (for Expert System)
 creds_out = widgets.Output()
 creds_pass1 = widgets.Text(placeholder='Password for API', description="API Password:")
 creds_user = widgets.Text(placeholder="User Name for API", description="API User:")
 creds_button = widgets.Button(description="Save Creds")
+# Dummy on_button_clicked function for compatibility
+def on_button_clicked(b):
+    pass
+# (You can extend this logic as needed.)
 
 def handle_get_creds(button):
     with creds_out:
@@ -709,31 +777,23 @@ def handle_get_creds(button):
 
 creds_button.on_click(handle_get_creds)
 
-def create_settings_tab():
+def create_settings_tab_expert():
     enable_api_toggle = widgets.ToggleButton(value=ENABLE_FLASK_API, description='Enable Flask API',
                                              tooltip='Toggle Flask API', icon='power-off')
-    def on_api_toggle_value_change(change):
-        global ENABLE_FLASK_API
-        ENABLE_FLASK_API = change['new']
-        print("Flask API enabled. Please restart." if ENABLE_FLASK_API else "Flask API disabled.")
-    enable_api_toggle.observe(on_api_toggle_value_change, names='value')
+    enable_api_toggle.observe(lambda change: print("Flask API enabled. Please restart." if change['new'] else "Flask API disabled."), names='value')
     settings_output = widgets.Output()
     with settings_output:
         clear_output()
-        print("Settings Tab Content")
+        print("Expert System Settings")
         print(f"User Files Directory: {USER_FILES_DIR}")
         print(f"Credentials File: {CREDENTIALS_FILE}")
         print(f"Connectors File: {CONNECTORS_FILE}")
         show_settings_button = widgets.Button(description="Show Settings", button_style='info')
         display(show_settings_button, creds_user, creds_pass1, creds_button, creds_out)
-        def display_current_settings(b):
-            with settings_output:
-                print(f"Current AI Engine: {current_ai_engine}")
-        show_settings_button.on_click(display_current_settings)
-    settings_box = widgets.VBox([enable_api_toggle, settings_output])
-    return settings_box
+        show_settings_button.on_click(lambda b: print(f"Current AI Engine: {current_ai_engine}"))
+    return widgets.VBox([enable_api_toggle, settings_output])
 
-settings_tab = create_settings_tab()
+settings_tab_expert = create_settings_tab_expert()
 
 # Search Tab
 search_query = widgets.Text(placeholder='Enter your legal query here', description='Query:')
@@ -775,7 +835,9 @@ def handle_search(button):
         for i, doc_excerpt in enumerate(context_documents):
             print(f"{i+1}. {doc_excerpt}\n")
     report = gemini_chat.generate_report(
-        f"Generate a detailed legal report for the query: '{query}'.", context_documents)
+        f"Based on the provided information and the user's query: '{query}', generate a detailed report that addresses the query. Include relevant legal information, resources, potential contacts, and any other helpful information.",
+        context_documents
+    )
     with chat_output:
         clear_output()
         display(HTML(f"<pre>{report}</pre>"))
@@ -829,6 +891,8 @@ def handle_add_task(button):
         print(f"Added task {task_id} for URL: {url} (Category: {category})")
     update_task_status()
 
+train_add_button.on_click(handle_add_task)
+
 def update_task_status():
     with train_status_output:
         clear_output()
@@ -836,8 +900,6 @@ def update_task_status():
             print(f"Task {task_id}: {status.get('status', 'unknown')}")
             if status.get("status") == "failed":
                 print(f"  Error: {status.get('error')}")
-
-train_add_button.on_click(handle_add_task)
 
 # Postulate Tab
 postulate_area = widgets.Text(description="Area of Law:")
@@ -999,26 +1061,243 @@ scenarios_tab = widgets.VBox([
     scenario_output
 ])
 
-# ----------------------- Main Layout -----------------------
-tab = widgets.Tab()
-tab.children = [
+# ----------------------- Timeline Tab -----------------------
+timeline_area = widgets.Output()
+
+# We create a simple UI for adding timeline events.
+timeline_events = []  # List to store timeline events
+timeline_table = widgets.Output()
+
+def update_timeline_table():
+    global timeline_events
+    with timeline_table:
+        clear_output()
+        if not timeline_events:
+            print("No events added to the timeline yet.")
+            return
+        df = pd.DataFrame(timeline_events)
+        display(HTML(df.to_html(index=False, classes='table table-striped')))
+
+def add_timeline_event_ui():
+    event_time = widgets.Text(description="Time (or Approx.):", layout=widgets.Layout(width='30%'))
+    event_description = widgets.Textarea(description="Event:", layout=widgets.Layout(width='70%'))
+    add_event_button = widgets.Button(description="Add Event")
+    hbox = widgets.HBox([event_time, event_description, add_event_button])
+    display(hbox)
+    def handle_add_event(button):
+        global timeline_events
+        timeline_events.append({"time": event_time.value, "description": event_description.value})
+        event_time.value = ""
+        event_description.value = ""
+        update_timeline_table()
+    add_event_button.on_click(handle_add_event)
+
+def create_timeline_display():
+    with timeline_area:
+        clear_output()
+        display(timeline_table)
+        add_timeline_event_ui()
+
+# ----------------------- MAIN EXPERT SYSTEM UI -----------------------
+
+# Create a Tab widget for the Legal Expert System
+expert_system_tabs = widgets.Tab()
+expert_system_tabs.children = [
     widgets.VBox([search_query, search_button, search_output, search_context_output, chat_output]),
     widgets.VBox([browse_output]),
     widgets.VBox([train_url_text, train_category_dropdown, train_add_button, train_output, train_status_output]),
     widgets.VBox([postulate_area, postulate_button, postulate_output]),
     scenarios_tab,
-    settings_tab
+    settings_tab_expert if 'settings_tab_expert' in globals() else settings_tab  # Use expert settings if available
 ]
-tab.set_title(0, "Search")
-tab.set_title(1, "Browse")
-tab.set_title(2, "Train")
-tab.set_title(3, "Postulate")
-tab.set_title(4, "Scenarios")
-tab.set_title(5, "Settings")
+expert_system_tabs.set_title(0, "Search")
+expert_system_tabs.set_title(1, "Browse")
+expert_system_tabs.set_title(2, "Train")
+expert_system_tabs.set_title(3, "Postulate")
+expert_system_tabs.set_title(4, "Scenarios")
+expert_system_tabs.set_title(5, "Settings")
 
-# Display the UI
-create_browse_display()  # Populate Browse tab initially
-update_task_status()     # Show any pending tasks
+###############################################
+#         ENHANCED LEGAL RESEARCH APP         #
+###############################################
 
+class EnhancedLegalResearchApp:
+    def __init__(self):
+        # Improved configuration management
+        self.config = {
+            'theme': 'light',
+            'font_size': 'medium',
+            'ai_engine': 'Gemini',
+            'advanced_mode': False
+        }
+        self.load_user_preferences()
+
+    def load_user_preferences(self):
+        config_path = os.path.expanduser("~/.legal_research_app/preferences.json")
+        try:
+            with open(config_path, 'r') as f:
+                saved_config = json.load(f)
+                self.config.update(saved_config)
+        except FileNotFoundError:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            self.save_user_preferences()
+
+    def save_user_preferences(self):
+        config_path = os.path.expanduser("~/.legal_research_app/preferences.json")
+        with open(config_path, 'w') as f:
+            json.dump(self.config, f, indent=4)
+
+    def create_intelligent_interface(self):
+        self.contextual_help = widgets.HTML(
+            value='<div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px;">'
+                  'Welcome! Hover over elements or use the help button for guidance.</div>',
+            layout=widgets.Layout(width='100%', margin='10px 0')
+        )
+        self.smart_search = widgets.Text(
+            placeholder='Enter your legal query (e.g., "Contract breach damages")',
+            description='Smart Search:',
+            layout=widgets.Layout(width='100%')
+        )
+        self.search_suggestions = widgets.Dropdown(
+            options=['Recent Searches', 'Popular Queries', 'Recommended'],
+            description='Suggestions:',
+            disabled=True
+        )
+        self.complexity_toggle = widgets.ToggleButton(
+            value=False,
+            description='Advanced Mode',
+            tooltip='Toggle between simplified and comprehensive views',
+            icon='cogs'
+        )
+        self.theme_selector = widgets.Dropdown(
+            options=['Light', 'Dark', 'High Contrast'],
+            value=self.config['theme'].capitalize(),
+            description='Theme:'
+        )
+        self.font_size_selector = widgets.Dropdown(
+            options=['Small', 'Medium', 'Large', 'Extra Large'],
+            value=self.config['font_size'].capitalize(),
+            description='Font Size:'
+        )
+        self.ai_engine_selector = widgets.Dropdown(
+            options=['Gemini', 'Claude', 'Custom'],
+            value=self.config['ai_engine'],
+            description='AI Engine:'
+        )
+        self.workflow_wizard = widgets.Accordion(
+            children=[
+                widgets.HTML(
+                    value='<div style="padding: 10px;">'
+                          'Step-by-step guidance for legal research and analysis.'
+                          '</div>'
+                ),
+                widgets.VBox([
+                    widgets.Label('1. Define Your Legal Scenario'),
+                    widgets.Label('2. Gather Initial Information'),
+                    widgets.Label('3. Conduct Preliminary Research'),
+                    widgets.Label('4. Analyze Findings'),
+                    widgets.Label('5. Generate Comprehensive Report')
+                ])
+            ],
+            titles=('Workflow Wizard', 'Steps')
+        )
+        self.error_prediction = widgets.HTML(
+            value='<div style="color: green;">No potential issues detected.</div>',
+            layout=widgets.Layout(width='100%', margin='10px 0')
+        )
+        self.complexity_toggle.observe(self.toggle_complexity, names='value')
+        self.theme_selector.observe(self.change_theme, names='value')
+        self.font_size_selector.observe(self.adjust_font_size, names='value')
+        main_layout = widgets.VBox([
+            self.contextual_help,
+            widgets.HBox([self.smart_search, self.search_suggestions]),
+            widgets.HBox([self.complexity_toggle, self.theme_selector, self.font_size_selector]),
+            self.ai_engine_selector,
+            self.workflow_wizard,
+            self.error_prediction
+        ])
+        return main_layout
+
+    def toggle_complexity(self, change):
+        self.config['advanced_mode'] = change['new']
+        self.contextual_help.value = (
+            '<div style="background-color: #e6f2ff; padding: 10px; border-radius: 5px;">'
+            f'{"Advanced mode enabled. More detailed controls available." if change["new"] else "Simplified interface active."}'
+            '</div>'
+        )
+        self.save_user_preferences()
+
+    def change_theme(self, change):
+        self.config['theme'] = change['new'].lower()
+        theme_styles = {
+            'light': {'background': 'white', 'text_color': 'black'},
+            'dark': {'background': '#2c3e50', 'text_color': 'white'},
+            'high contrast': {'background': 'black', 'text_color': 'yellow'}
+        }
+        selected_theme = theme_styles.get(self.config['theme'], theme_styles['light'])
+        self.contextual_help.value = (
+            f'<div style="background-color: {selected_theme["background"]}; color: {selected_theme["text_color"]}; '
+            f'padding: 10px; border-radius: 5px;">Theme changed to {self.config["theme"].capitalize()}.</div>'
+        )
+        self.save_user_preferences()
+
+    def adjust_font_size(self, change):
+        self.config['font_size'] = change['new'].lower()
+        font_sizes = {
+            'small': '12px',
+            'medium': '16px',
+            'large': '20px',
+            'extra large': '24px'
+        }
+        selected_size = font_sizes.get(self.config['font_size'], '16px')
+        self.contextual_help.value = (
+            f'<div style="font-size: {selected_size}; padding: 10px; border-radius: 5px;">'
+            f'Font size set to {self.config["font_size"].capitalize()}.</div>'
+        )
+        self.save_user_preferences()
+
+    def run(self):
+        interface = self.create_intelligent_interface()
+        display(interface)
+
+# ----------------------- MAIN INTERFACE: TOP-TAB UI -----------------------
+# Create two main sections:
+# 1. Expert System (the legal expert system with multiple tabs)
+# 2. Enhanced Research (the enhanced, adaptive interface)
+enhanced_app = EnhancedLegalResearchApp()
+enhanced_interface = enhanced_app.create_intelligent_interface()
+
+# Expert System main tab
+expert_system_tabs = widgets.Tab()
+expert_system_tabs.children = [
+    widgets.VBox([search_query, search_button, search_output, search_context_output, chat_output]),
+    widgets.VBox([browse_output]),
+    widgets.VBox([train_url_text, train_category_dropdown, train_add_button, train_output, train_status_output]),
+    widgets.VBox([postulate_area, postulate_button, postulate_output]),
+    scenarios_tab,
+    settings_tab_expert if 'settings_tab_expert' in globals() else settings_tab
+]
+expert_system_tabs.set_title(0, "Search")
+expert_system_tabs.set_title(1, "Browse")
+expert_system_tabs.set_title(2, "Train")
+expert_system_tabs.set_title(3, "Postulate")
+expert_system_tabs.set_title(4, "Scenarios")
+expert_system_tabs.set_title(5, "Settings")
+
+# Create a top-level tab with two sections:
+# "Enhanced" for the enhanced research interface and "Expert" for the expert system.
+top_level_tabs = widgets.Tab()
+top_level_tabs.children = [
+    enhanced_interface,
+    expert_system_tabs
+]
+top_level_tabs.set_title(0, "Enhanced")
+top_level_tabs.set_title(1, "Expert System")
+
+###############################################
+#                 RUN THE APP                 #
+###############################################
+
+# Display title/license info and the top-level tab interface
 display(title_and_license)
-display(tab)
+display(top_level_tabs)
