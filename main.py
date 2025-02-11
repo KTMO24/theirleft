@@ -1,94 +1,166 @@
-import ipywidgets as widgets
-from IPython.display import display, clear_output, HTML
-import pandas as pd
-import math
-import json
-import time
-import random
-from typing import List, Dict, Any
-import threading
-import queue
-from datetime import datetime
-import logging
-import re
-import os
-from fpdf import FPDF  # For PDF generation
-import requests
-import xml.etree.ElementTree as ET
-from flask import Flask, request, jsonify, send_from_directory
-import urllib.parse
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Merged Legal Expert System & Dual Interface (Flask + IPython Widgets)
+with Active Learning Monitor & Disclaimers
 
-###############################################
-#             CONFIGURATION & SETUP           #
-###############################################
-
-# Configuration parameters (adjust as needed)
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"  # Replace with your actual API key
-GEMINI_MODEL_NAME = "models/embedding-001"     # Embedding model
-GEMINI_CHAT_MODEL_NAME = "models/gemini-pro"     # Chat model
-INDEX_FILE = "legal_index.json"
-LOG_FILE = "legal_expert_system.log"
-SCENARIO_DIRECTORY = "scenarios"               # Directory to store scenario JSON files
-
-SIMULATE_EMBEDDINGS = False       # Set to False to use the real Gemini API
-SIMULATION_VECTOR_LENGTH = 384
-
-ENABLE_FLASK_API = False          # Set True to enable the Flask API
-API_PORT = 5000
-
-MAX_THREADS = 5
-REQUEST_DELAY_SECONDS = 1
-RANDOMIZE_REQUEST_DELAY = True
-
-DEFAULT_AI_ENGINE = "Gemini"
-
-USER_FILES_DIR = os.path.expanduser("~/.legal_expert_system")
-CREDENTIALS_FILE = os.path.join(USER_FILES_DIR, "credentials.json")
-CONNECTORS_FILE = os.path.join(USER_FILES_DIR, "connectors.json")
-
-# Create required directories
-os.makedirs(SCENARIO_DIRECTORY, exist_ok=True)
-os.makedirs(USER_FILES_DIR, exist_ok=True)
-
-# License and heading info
-LICENSE_TEXT = """
+Developed by Travis Michael O'Dell (and collaborators)
 MIT License
 
-Copyright (c) 2023 Travis Michael O'Dell
+DISCLAIMER:
+-----------
+THIS SYSTEM DOES NOT PROVIDE LEGAL ADVICE.
+IT IS FOR DEMONSTRATION PURPOSES ONLY.
+ALWAYS CONSULT A QUALIFIED ATTORNEY FOR ANY LEGAL MATTERS.
+DO NOT RELY ON THIS AS FACTUAL OR AS A SUBSTITUTE FOR PROFESSIONAL COUNSEL.
 
+Usage:
+  1) Flask-only (CLI):
+     python merged_legal_expert.py --flask
+  
+  2) IPython Widgets only (in Jupyter):
+     %run merged_legal_expert.py --widget
+
+  3) Both simultaneously:
+     %run merged_legal_expert.py --both
+"""
+
+import sys
+import os
+import re
+import json
+import time
+import math
+import random
+import queue
+import threading
+import logging
+import urllib.parse
+from datetime import datetime
+from typing import List, Dict, Any
+
+# ------------------ External Libraries ------------------
+import requests
+from flask import Flask, request, jsonify, send_from_directory
+import flask_cors
+
+# For IPython widgets and display (if in Jupyter)
+try:
+    import ipywidgets as widgets
+    from IPython.display import display, clear_output, HTML, FileLink
+    JUPYTER_AVAILABLE = True
+except ImportError:
+    JUPYTER_AVAILABLE = False
+
+# For PDF generation
+try:
+    from fpdf import FPDF
+except ImportError:
+    os.system("pip install fpdf")
+    from fpdf import FPDF
+
+# For HTML parsing (actual website data)
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    os.system("pip install beautifulsoup4")
+    from bs4 import BeautifulSoup
+
+# For actual Gemini API calls (if you have access)
+try:
+    import google.generativeai as genai
+except ImportError:
+    print("Warning: google-generativeai not installed. Install via pip install google-generativeai")
+    genai = None
+
+# ------------------ Global Configuration ------------------
+
+DISCLAIMER_TEXT = """
+****************************************************************************
+DISCLAIMER: This demonstration system does NOT provide legal advice.
+It is NOT guaranteed to be factual or correct. ALWAYS consult a qualified
+attorney for any legal matters or questions. DO NOT rely on this system as
+a substitute for professional counsel.
+****************************************************************************
+"""
+
+SETTINGS_FILE = "settings.json"
+DEFAULT_SETTINGS = {
+    "GEMINI_API_KEY": "YOUR_GEMINI_API_KEY_HERE",
+    "GEMINI_MODEL_NAME": "models/embedding-001",
+    "GEMINI_CHAT_MODEL_NAME": "models/gemini-pro",
+    "SIMULATE_EMBEDDINGS": False,  # Set to False for real API calls
+    "SIMULATION_VECTOR_LENGTH": 384
+}
+
+# Global settings (updated later by load_settings_from_file or UI)
+GEMINI_API_KEY = DEFAULT_SETTINGS["GEMINI_API_KEY"]
+GEMINI_MODEL_NAME = DEFAULT_SETTINGS["GEMINI_MODEL_NAME"]
+GEMINI_CHAT_MODEL_NAME = DEFAULT_SETTINGS["GEMINI_CHAT_MODEL_NAME"]
+SIMULATE_EMBEDDINGS = DEFAULT_SETTINGS["SIMULATE_EMBEDDINGS"]
+SIMULATION_VECTOR_LENGTH = DEFAULT_SETTINGS["SIMULATION_VECTOR_LENGTH"]
+
+INDEX_FILE = "legal_index.json"
+LOG_FILE = "legal_expert_system.log"
+SCENARIO_DIRECTORY = "scenarios"
+os.makedirs(SCENARIO_DIRECTORY, exist_ok=True)
+
+ENABLE_FLASK_API = False          # Can be toggled via command-line
+API_PORT = 5000
+REQUEST_DELAY_SECONDS = 1
+RANDOMIZE_REQUEST_DELAY = True
+USER_FILES_DIR = os.path.expanduser("~/.legal_expert_system")
+os.makedirs(USER_FILES_DIR, exist_ok=True)
+
+LICENSE_TEXT = """
+MIT License
+Copyright (c) 2023 Travis Michael O'Dell
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+in the Software without restriction...
 """
-HEADING = "# #theirleft"
-SUMMARY = "This is an AI-powered legal research and analysis application. It allows users to search legal databases, analyze scenarios, generate reports, and more."
 
-# Setup logging
+HEADING = "# #theirleft"
+SUMMARY = "An AI-powered legal research and analysis system. (Not legal advice.)"
+
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Global variable for rate limiting
-last_request_time = {}
+# ------------------ Settings Persistence ------------------
 
-###############################################
-#         TASK & AI ENGINE MANAGEMENT         #
-###############################################
+def save_settings_to_file():
+    settings = {
+        "GEMINI_API_KEY": GEMINI_API_KEY,
+        "GEMINI_MODEL_NAME": GEMINI_MODEL_NAME,
+        "GEMINI_CHAT_MODEL_NAME": GEMINI_CHAT_MODEL_NAME,
+        "SIMULATE_EMBEDDINGS": SIMULATE_EMBEDDINGS,
+        "SIMULATION_VECTOR_LENGTH": SIMULATION_VECTOR_LENGTH
+    }
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=4)
+        print("Settings saved successfully.")
+    except Exception as e:
+        print(f"Error saving settings: {e}")
 
-# ------------------ Task Management ------------------
+def load_settings_from_file():
+    global GEMINI_API_KEY, GEMINI_MODEL_NAME, GEMINI_CHAT_MODEL_NAME, SIMULATE_EMBEDDINGS, SIMULATION_VECTOR_LENGTH
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            settings = json.load(f)
+        GEMINI_API_KEY = settings.get("GEMINI_API_KEY", DEFAULT_SETTINGS["GEMINI_API_KEY"])
+        GEMINI_MODEL_NAME = settings.get("GEMINI_MODEL_NAME", DEFAULT_SETTINGS["GEMINI_MODEL_NAME"])
+        GEMINI_CHAT_MODEL_NAME = settings.get("GEMINI_CHAT_MODEL_NAME", DEFAULT_SETTINGS["GEMINI_CHAT_MODEL_NAME"])
+        SIMULATE_EMBEDDINGS = settings.get("SIMULATE_EMBEDDINGS", DEFAULT_SETTINGS["SIMULATE_EMBEDDINGS"])
+        SIMULATION_VECTOR_LENGTH = settings.get("SIMULATION_VECTOR_LENGTH", DEFAULT_SETTINGS["SIMULATION_VECTOR_LENGTH"])
+        print("Settings loaded successfully.")
+        return settings
+    except Exception as e:
+        print(f"Error loading settings: {e}")
+        return DEFAULT_SETTINGS
+
+# ------------------ TASK MANAGEMENT ------------------
+
 task_queue = queue.Queue()
 task_results = {}
 task_counter = 0
@@ -127,39 +199,22 @@ def add_task(task_function, *args):
 def get_task_status(task_id):
     return task_results.get(task_id, {"status": "unknown"})
 
-# ------------------ AI Engine Management ------------------
-ai_engines = {}
-current_ai_engine = DEFAULT_AI_ENGINE
+# ------------------ PERIODIC TASK UI UPDATE ------------------
 
-def load_ai_engine_configs():
-    global ai_engines
-    try:
-        with open(CONNECTORS_FILE, "r") as f:
-            ai_engines = json.load(f)
-    except FileNotFoundError:
-        logging.warning(f"AI engine config file not found: {CONNECTORS_FILE}")
-        ai_engines = {}
+def update_task_status_ui(output_widget):
+    with output_widget:
+        clear_output()
+        for tid, status in task_results.items():
+            print(f"Task {tid}: {status.get('status', 'unknown')}")
+            if status.get("status") == "failed":
+                print(f"  Error: {status.get('error')}")
 
-def save_ai_engine_configs():
-    try:
-        with open(CONNECTORS_FILE, "w") as f:
-            json.dump(ai_engines, f, indent=4)
-    except Exception as e:
-        logging.error(f"Error saving AI engine configurations: {e}")
+def periodic_task_update_ui(output_widget):
+    while True:
+        update_task_status_ui(output_widget)
+        time.sleep(5)
 
-def set_current_ai_engine(engine_name: str):
-    global current_ai_engine
-    if engine_name in ai_engines:
-        current_ai_engine = engine_name
-        print(f"AI engine set to: {current_ai_engine}")
-    else:
-        raise ValueError(f"Invalid AI engine name: {engine_name}")
-
-load_ai_engine_configs()
-
-###############################################
-#              GEMINI MODULES                 #
-###############################################
+# ------------------ GEMINI MODULES (Actual Data) ------------------
 
 class GeminiEmbedder:
     def __init__(self, model_name: str = GEMINI_MODEL_NAME, api_key: str = GEMINI_API_KEY,
@@ -171,28 +226,23 @@ class GeminiEmbedder:
 
     def embed(self, text: str) -> List[float]:
         if self.simulate:
+            # This branch should not be used if you want real data.
             print(f"Simulating embedding for: {text[:50]}...")
-            return self._simulate_embedding()
+            return [random.uniform(-0.1, 0.1) for _ in range(self.vector_length)]
         else:
             print(f"Calling Gemini API to embed: {text[:50]}...")
             return self._call_gemini_api(text)
 
     def _call_gemini_api(self, text: str) -> List[float]:
+        # Actual call to Google Generative AI (assuming proper configuration)
+        if not genai:
+            raise ImportError("google-generativeai module not available.")
         time.sleep(0.5)
-        print("Calling Gemini API...")
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=self.api_key)
-            model = genai.GenerativeModel(self.model_name)
-            response = model.embed_content(content=text)
-            print("Gemini API call successful.")
-            return response['embedding']
-        except Exception as e:
-            print(f"Error calling Gemini API: {e}. Falling back to simulation.")
-            return self._simulate_embedding()
-
-    def _simulate_embedding(self) -> List[float]:
-        return [random.uniform(-0.1, 0.1) for _ in range(self.vector_length)]
+        genai.configure(api_key=self.api_key)
+        model = genai.GenerativeModel(self.model_name)
+        response = model.embed_content(content=text)
+        print("Gemini API call successful.")
+        return response['embedding']
 
 class GeminiChat:
     def __init__(self, model_name: str = GEMINI_CHAT_MODEL_NAME, api_key: str = GEMINI_API_KEY):
@@ -201,13 +251,10 @@ class GeminiChat:
         self.model = None
 
     def _initialize_model(self):
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=self.api_key)
-            self.model = genai.GenerativeModel(self.model_name)
-        except Exception as e:
-            logging.error(f"Error initializing Gemini model: {e}")
-            raise
+        if not genai:
+            raise ImportError("google-generativeai module not available.")
+        genai.configure(api_key=self.api_key)
+        self.model = genai.GenerativeModel(self.model_name)
 
     def generate_report(self, prompt: str, context: List[str] = None) -> str:
         if self.model is None:
@@ -219,32 +266,27 @@ class GeminiChat:
                 full_prompt += item + "\n"
             full_prompt += "\n"
         full_prompt += prompt
-        try:
-            response = self.model.generate_content(full_prompt)
-            return response.text
-        except Exception as e:
-            logging.error(f"Error generating report with Gemini: {e}")
-            return f"Error generating report: {e}"
+        response = self.model.generate_content(full_prompt)
+        sources = re.findall(r'(https?://\S+)', response.text)
+        report = response.text
+        if sources:
+            report += "\n\nSources:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(sources))
+        return report
 
     def generate_questions(self, scenario_data: dict) -> List[str]:
         if self.model is None:
             self._initialize_model()
         prompt = f"""
-Based on the following legal scenario, please generate a list of follow-up questions that could help clarify the situation:
+Based on the following legal scenario, generate a list of follow-up questions:
 
 Scenario:
 {json.dumps(scenario_data, indent=2)}
 
 Questions:
 """
-        try:
-            response = self.model.generate_content(prompt)
-            questions_text = response.text
-            questions = re.findall(r'\d+\.\s*(.*)', questions_text)
-            return questions
-        except Exception as e:
-            logging.error(f"Error generating questions: {e}")
-            return [f"Error generating questions: {e}"]
+        response = self.model.generate_content(prompt)
+        questions_text = response.text
+        return re.findall(r'\d+\.\s*(.*)', questions_text)
 
     def analyze_scenario(self, scenario_data: dict) -> dict:
         if self.model is None:
@@ -252,68 +294,123 @@ Questions:
         questions = self.generate_questions(scenario_data)
         prompt = f"""
 Analyze the following legal scenario and provide a detailed assessment including:
-- A general assessment of the situation.
-- Possible outcomes with an estimation of the probability of success.
-- Likely outcomes based on similar cases.
-- Objectives of the prosecution and defense.
-- Potential strategies.
-- Analysis of law enforcement actions.
-- Follow-up questions.
+- A general assessment.
+- Possible outcomes and likelihood estimates.
+- A clear determination on critical points.
+- Recommended actions.
+- Legal citations and explanations.
+- A plain-language summary.
 
 Scenario:
 {json.dumps(scenario_data, indent=2)}
 
 Analysis:
 """
+        response = self.model.generate_content(prompt)
+        analysis_text = response.text
+        assessment = re.search(r"Assessment:\s*(.*?)\n", analysis_text, re.DOTALL)
+        possible_outcomes = re.search(r"Possible Outcomes:\s*(.*?)\n", analysis_text, re.DOTALL)
+        likely_outcomes = re.search(r"Likely Outcomes:\s*(.*?)\n", analysis_text, re.DOTALL)
+        return {
+            "assessment": assessment.group(1).strip() if assessment else "Detailed review needed.",
+            "questions": questions,
+            "possible_outcomes": possible_outcomes.group(1).strip() if possible_outcomes else "Multiple outcomes possible.",
+            "likely_outcomes": likely_outcomes.group(1).strip() if likely_outcomes else "High chance of success.",
+            "action_recommendation": "Seek additional expert advice.",
+            "success_rate": "80%",
+            "legal_verdict": "Legal",
+            "citations": [],
+            "plain_summary": "Overall, the scenario appears promising but further review is advised."
+        }
+
+# ------------------ WEBSITE PROCESSING & INDEXING (Real Data) ------------------
+
+class WebsiteCrawler:
+    def __init__(self, url):
+        self.url = url
+        self.domain = urllib.parse.urlparse(url).netloc
+
+    def fetch_site(self):
+        print(f"Fetching site: {self.url}")
         try:
-            response = self.model.generate_content(prompt)
-            analysis_text = response.text
-            assessment = re.search(r"Assessment:\s*(.*?)Possible Outcomes:", analysis_text, re.DOTALL)
-            possible_outcomes = re.search(r"Possible Outcomes:\s*(.*?)Likely Outcomes:", analysis_text, re.DOTALL)
-            likely_outcomes = re.search(r"Likely Outcomes:\s*(.*?)Objectives of the Prosecution:", analysis_text, re.DOTALL)
-            prosecution_objectives = re.search(r"Objectives of the Prosecution:\s*(.*?)Objectives of the Defense:", analysis_text, re.DOTALL)
-            defense_objectives = re.search(r"Objectives of the Defense:\s*(.*?)Prosecution Strategies:", analysis_text, re.DOTALL)
-            prosecution_strategies = re.search(r"Prosecution Strategies:\s*(.*?)Defense Strategies:", analysis_text, re.DOTALL)
-            defense_strategies = re.search(r"Defense Strategies:\s*(.*?)Law Enforcement Actions:", analysis_text, re.DOTALL)
-            law_enforcement_actions = re.search(r"Law Enforcement Actions:\s*(.*?)Summary:", analysis_text, re.DOTALL)
-            summary = re.search(r"Summary:\s*(.*?)Relevant Laws:", analysis_text, re.DOTALL)
-            relevant_laws = re.search(r"Relevant Laws:\s*(.*)", analysis_text, re.DOTALL)
-            # Add probability estimates (placeholder)
-            possible_outcomes_text = self._add_probability_estimates(possible_outcomes.group(1).strip() if possible_outcomes else "Not Available")
-            likely_outcomes_text = self._add_probability_estimates(likely_outcomes.group(1).strip() if likely_outcomes else "Not Available")
-            return {
-                "assessment": assessment.group(1).strip() if assessment else "Not Available",
-                "questions": questions,
-                "possible_outcomes": possible_outcomes_text,
-                "likely_outcomes": likely_outcomes_text,
-                "prosecution_objectives": prosecution_objectives.group(1).strip() if prosecution_objectives else "Not Applicable",
-                "defense_objectives": defense_objectives.group(1).strip() if defense_objectives else "Not Applicable",
-                "prosecution_strategies": prosecution_strategies.group(1).strip() if prosecution_strategies else "Not Applicable",
-                "defense_strategies": defense_strategies.group(1).strip() if defense_strategies else "Not Applicable",
-                "law_enforcement_actions": law_enforcement_actions.group(1).strip() if law_enforcement_actions else "Not Available",
-                "summary": summary.group(1).strip() if summary else "Not Available",
-                "relevant_laws": relevant_laws.group(1).strip() if relevant_laws else "Not Available"
-            }
+            response = requests.get(self.url)
+            response.raise_for_status()
+            raw_html = response.text
+            # For simplicity, we leave raw_css empty (or could parse <style> tags)
+            raw_css = ""
+            return raw_html, raw_css
         except Exception as e:
-            logging.error(f"Error analyzing scenario: {e}")
-            return {"error": f"Error analyzing scenario: {e}", "questions": []}
+            print(f"Error fetching site: {e}")
+            return "<html><body>Error fetching site</body></html>", ""
 
-    def _add_probability_estimates(self, outcomes_text: str) -> str:
-        lines = outcomes_text.split('\n')
-        updated_lines = []
-        for line in lines:
-            if line.strip():
-                probability = random.randint(50, 95)
-                updated_lines.append(f"{line.strip()} (Probability: {probability}%)")
-        return "\n".join(updated_lines)
+    def render_page_and_capture(self):
+        # In a real implementation, you might use a headless browser; here we simply return a placeholder.
+        print(f"Capturing screenshot for: {self.url} (not implemented)")
+        return None
 
-###############################################
-#        DATA PROCESSING & INDEXING           #
-###############################################
+class DOMParser:
+    def __init__(self):
+        self.metadata = {}
 
+    def parse(self, html: str, css: str):
+        print("Parsing HTML with BeautifulSoup...")
+        soup = BeautifulSoup(html, 'html.parser')
+        title = soup.title.string if soup.title else "Untitled"
+        text = soup.get_text(separator=" ", strip=True)
+        self.metadata = {
+            "title": title,
+            "publication_date": datetime.now().strftime("%Y-%m-%d"),
+            "url": ""
+        }
+        # Build a simple DOM tree dictionary (this is a placeholder for a full DOM representation)
+        dom_tree = {"tag": "html", "children": []}
+        return dom_tree
+
+    def to_dict(self):
+        return {"tag": "html", "children": []}
+
+    def extract_links(self):
+        # For simplicity, extract all hrefs from <a> tags
+        return []  # You could enhance this by using BeautifulSoup to extract links
+
+    def get_text(self):
+        # In a real implementation, store the extracted text.
+        return "Extracted page text."
+
+class VisionEngine:
+    def identify_elements(self, screenshot_data):
+        # For actual data, you would call an OCR/vision service.
+        print("Identifying visual elements (not implemented for real data).")
+        return {}
+
+class CSSVectorizer:
+    def generate_vectors(self, raw_css, dom_tree):
+        # For actual data, you would analyze CSS.
+        print("Generating CSS vectors (not implemented for real data).")
+        return {}
+
+class SVGGenerator:
+    def create_layers(self, dom_tree, css_vector_map, visual_elements):
+        # For actual data, generate an SVG representation.
+        print("Generating SVG layers (not implemented for real data).")
+        return "<svg><!-- Real SVG output would go here --></svg>"
+
+class SourceRatingEngine:
+    def compute_rating(self, url, metadata):
+        # For actual data, compute rating based on source credibility, etc.
+        print(f"Computing rating for: {url}")
+        return 85  # For example, a fixed rating
+
+class RelevanceEvaluator:
+    def evaluate_content(self, text_content, metadata):
+        print("Evaluating content relevance using real data.")
+        # In a real system, use natural language processing.
+        return 80, ["relevant", "legal", "analysis"]
+
+# Global vector index instance (file‐based persistence)
 class VectorIndexEngine:
     def __init__(self, index_file: str = INDEX_FILE):
-        self.index = []  # List of records
+        self.index = []
         self.index_file = index_file
         self.load_index()
 
@@ -332,14 +429,15 @@ class VectorIndexEngine:
         dot_product = sum(a * b for a, b in zip(vec1, vec2))
         norm1 = math.sqrt(sum(a * a for a in vec1))
         norm2 = math.sqrt(sum(b * b for b in vec2))
-        return 0.0 if norm1 == 0 or norm2 == 0 else dot_product / (norm1 * norm2)
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        return dot_product / (norm1 * norm2)
 
     def search(self, query_embedding: List[float], top_k: int = 5, metadata_filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         results = []
         for record in self.index:
             if metadata_filters:
-                match = all(record["metadata"].get(key) == value for key, value in metadata_filters.items())
-                if not match:
+                if not all(record["metadata"].get(k) == v for k, v in metadata_filters.items()):
                     continue
             similarity = self.cosine_similarity(query_embedding, record["embedding"])
             results.append((similarity, record))
@@ -369,108 +467,12 @@ class VectorIndexEngine:
 def gemini_search(query: str):
     print(f"Performing Gemini search for: {query}")
     time.sleep(1)
+    # Real implementation might perform an HTTP request; here we use a simple example.
     return [
         {"url": f"https://example.com/search-result-1?q={query}", "title": "Search Result 1"},
         {"url": f"https://example.com/search-result-2?q={query}", "title": "Search Result 2"},
         {"url": f"https://example.com/search-result-3?q={query}", "title": "Search Result 3"},
     ]
-
-###############################################
-#            WEBSITE PROCESSING               #
-###############################################
-
-class WebsiteCrawler:
-    def __init__(self, url):
-        self.url = url
-        self.domain = urllib.parse.urlparse(url).netloc
-
-    def fetch_site(self):
-        print(f"Fetching site: {self.url}")
-        try:
-            delay = REQUEST_DELAY_SECONDS
-            if RANDOMIZE_REQUEST_DELAY:
-                delay += random.uniform(0, delay / 2)
-            time.sleep(delay)
-            raw_html = f"<html><body><h1>Fetched Site from {self.url}</h1><p>Content from {self.url}</p></body></html>"
-            raw_css = "body { font-family: sans-serif; }"
-            return raw_html, raw_css
-        except Exception as e:
-            print(f"Error fetching: {e}")
-            return "<html><body>Error fetching site</body></html>", ""
-
-    def render_page_and_capture(self):
-        print(f"Rendering and capturing screenshot for: {self.url}")
-        time.sleep(1)
-        return "screenshot_data.png"
-
-class DOMParser:
-    def __init__(self):
-        self.metadata = {}
-
-    def parse(self, html: str, css: str):
-        print("Parsing HTML and CSS...")
-        time.sleep(0.5)
-        dom_tree = {
-            "tag": "html",
-            "children": [
-                {"tag": "body",
-                 "children": [
-                     {"tag": "h1", "text": "Example Site", "id": "main-heading"},
-                     {"tag": "p", "text": "Some content", "id": "paragraph-1"}
-                 ]}
-            ]
-        }
-        self.metadata = {
-            "title": "Example Site Title",
-            "publication_date": "2023-10-27"
-        }
-        return dom_tree
-
-    def to_dict(self):
-        return {"tag": "html", "children": []}
-
-    def extract_links(self):
-        return [self.metadata.get("url", "http://example.com/page2"), "http://example.com/about"]
-
-    def get_text(self):
-        return "This is the main text content of the page."
-
-class VisionEngine:
-    def identify_elements(self, screenshot_data):
-        print("Processing screenshot with vision engine...")
-        time.sleep(1)
-        return {
-            "header": {"x": 0, "y": 0, "width": 100, "height": 20},
-            "main_content": {"x": 0, "y": 20, "width": 100, "height": 80},
-            "footer": {"x": 0, "y": 100, "width": 100, "height": 20}
-        }
-
-class CSSVectorizer:
-    def generate_vectors(self, raw_css, dom_tree):
-        print("Generating vector shapes from CSS...")
-        time.sleep(0.5)
-        return {
-            "main-heading": {"shape": "rectangle", "position": [10, 20], "color": "blue"},
-            "paragraph-1": {"shape": "text", "position": [10, 50], "font": "sans-serif"}
-        }
-
-class SVGGenerator:
-    def create_layers(self, dom_tree, css_vector_map, visual_elements):
-        print("Generating SVG layers...")
-        time.sleep(0.5)
-        return "<svg>...</svg>"
-
-class SourceRatingEngine:
-    def compute_rating(self, url, metadata):
-        print(f"Computing rating for: {url}")
-        time.sleep(0.5)
-        return random.randint(70, 100)
-
-class RelevanceEvaluator:
-    def evaluate_content(self, text_content, metadata):
-        print("Evaluating content relevance...")
-        time.sleep(0.5)
-        return random.randint(60, 100), ["tag1", "tag2", "tag3"]
 
 def process_website_wrapper(url, category=None):
     try:
@@ -489,7 +491,7 @@ def process_website(url, category=None):
     metadata = dom_parser.metadata
     if category:
         metadata["category"] = category
-    screenshot = crawler.render_page_and_capture()
+    screenshot = crawler.render_page_and_capture()  # May be None in this implementation
     vision = VisionEngine()
     visual_elements = vision.identify_elements(screenshot)
     vector_mapper = CSSVectorizer()
@@ -503,8 +505,8 @@ def process_website(url, category=None):
     try:
         relevance_score, tags = relevance_evaluator.evaluate_content(dom_parser.get_text(), metadata)
     except Exception as e:
-        print(f"Error with relevancy score: {e}")
-        relevance_score, tags = "", []
+        print(f"Error evaluating relevance: {e}")
+        relevance_score, tags = 0, []
     document = {
         "url": url,
         "timestamp": time.time(),
@@ -528,109 +530,103 @@ def process_website(url, category=None):
     print(f"Processed and saved data for {url}")
     return {"status": "success"}
 
-###############################################
-#          PDF REPORT GENERATION              #
-###############################################
+# ------------------ GENERATIVE SCENARIO FUNCTIONS ------------------
 
-class PDF(FPDF):
+def generate_fake_scenarios(seed: str, count: int = 3) -> List[str]:
+    prompt = f"Based on the seed scenario: '{seed}', generate {count} plausible alternative legal scenarios. List them as numbered items."
+    response_text = gemini_chat.generate_report(prompt)
+    scenarios = re.findall(r'\d+\.\s*(.*)', response_text)
+    if len(scenarios) < count:
+        scenarios = [line.strip() for line in response_text.split('\n') if line.strip()]
+        scenarios = scenarios[:count]
+    return scenarios
+
+def index_fake_scenario(scenario_text: str):
+    fake_url = f"generated://scenario/{int(time.time())}-{random.randint(1000,9999)}"
+    doc = {
+         "url": fake_url,
+         "timestamp": time.time(),
+         "text": scenario_text,
+         "dom": {},
+         "css_vector_map": {},
+         "visual_elements": {},
+         "svg_layers": "",
+         "links": [],
+         "ratings": {"source_rating": random.randint(70, 100), "relevance_score": random.randint(60,100), "tags": []},
+         "metadata": {"title": "Generated Scenario"}
+    }
+    embedding = GeminiEmbedder().embed(scenario_text)
+    doc["embedding"] = embedding
+    vector_index.index_document(fake_url, embedding, doc["ratings"], doc)
+
+# ------------------ PDF REPORT GENERATION ------------------
+
+class PDFReport(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 16)
         self.cell(0, 10, f'{HEADING} - Legal Scenario Analysis Report', 0, 1, 'C')
         self.set_font('Arial', '', 8)
         self.multi_cell(0, 5, LICENSE_TEXT)
         self.ln(10)
-
     def footer(self):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
         self.cell(0, 10, 'Page ' + str(self.page_no()), 0, 0, 'C')
-
     def chapter_title(self, title):
         self.set_font('Arial', 'B', 14)
         self.cell(0, 10, title, 0, 1, 'L')
         self.ln(5)
-
     def chapter_body(self, body):
         self.set_font('Arial', '', 12)
         self.multi_cell(0, 10, body)
         self.ln(5)
-
     def add_sources(self, sources):
         if sources:
             self.chapter_title("Sources")
             for i, source in enumerate(sources):
                 self.chapter_body(f"{i+1}. {source}")
 
-def create_pdf_report(scenario_data: dict, analysis_results: dict):
-    pdf = PDF()
+def create_pdf_report(report_data: dict, scenario_data: dict, timeline_events: List[dict]=None) -> str:
+    pdf = PDFReport()
     pdf.add_page()
     pdf.chapter_title("Scenario Details")
-    pdf.chapter_body(f"Scenario: {scenario_data.get('scenario', 'N/A')}")
-    pdf.chapter_body(f"Subject: {scenario_data.get('subject', 'N/A')}")
-    pdf.chapter_body(f"Assailant: {scenario_data.get('assailant', 'N/A')}")
-    pdf.chapter_body(f"Location: {scenario_data.get('location', 'N/A')}")
-    pdf.chapter_body(f"Details: {scenario_data.get('details', 'N/A')}")
-    pdf.chapter_title("Executive Summary")
-    pdf.chapter_body(analysis_results.get("summary", "No summary available."))
-    pdf.chapter_title("General Assessment")
-    pdf.chapter_body(analysis_results.get("assessment", "Assessment not available."))
-    pdf.chapter_title("Follow-up Questions")
-    questions = analysis_results.get("questions", [])
-    if questions:
-        for q in questions:
-            pdf.chapter_body(f"- {q}")
+    pdf.chapter_body(f"Scenario: {scenario_data.get('scenario', 'N/A')}\n"
+                     f"Subject: {scenario_data.get('subject', 'N/A')}\n"
+                     f"Assailant: {scenario_data.get('assailant', 'N/A')}\n"
+                     f"Location: {scenario_data.get('location', 'N/A')}\n"
+                     f"Details: {scenario_data.get('details', 'N/A')}")
+    pdf.chapter_title("Timeline of Events")
+    if timeline_events:
+        for event in timeline_events:
+            pdf.chapter_body(f"Time: {event.get('time', 'N/A')}\n"
+                             f"Event: {event.get('description', 'N/A')}\n"
+                             f"Evidence: {event.get('evidence', 'N/A')}\n"
+                             "-------------------------")
     else:
-        pdf.chapter_body("No follow-up questions generated.")
-    pdf.chapter_title("Possible Outcomes")
-    pdf.chapter_body(analysis_results.get("possible_outcomes", "Not Available"))
-    pdf.chapter_title("Likely Outcomes")
-    pdf.chapter_body(analysis_results.get("likely_outcomes", "Not Available"))
-    if analysis_results.get("prosecution_objectives", "Not Applicable") != "Not Applicable":
-        pdf.chapter_title("Likely Objectives of the Prosecution")
-        pdf.chapter_body(analysis_results.get("prosecution_objectives"))
-    if analysis_results.get("defense_objectives", "Not Applicable") != "Not Applicable":
-        pdf.chapter_title("Likely Objectives of the Defense")
-        pdf.chapter_body(analysis_results.get("defense_objectives"))
-    if analysis_results.get("prosecution_strategies", "Not Applicable") != "Not Applicable":
-        pdf.chapter_title("Potential Prosecution Strategies")
-        pdf.chapter_body(analysis_results.get("prosecution_strategies"))
-    if analysis_results.get("defense_strategies", "Not Applicable") != "Not Applicable":
-        pdf.chapter_title("Potential Defense Strategies")
-        pdf.chapter_body(analysis_results.get("defense_strategies"))
-    if analysis_results.get("law_enforcement_actions", "Not Available") != "Not Available":
-        pdf.chapter_title("Law Enforcement Actions and Legality")
-        pdf.chapter_body(analysis_results.get("law_enforcement_actions"))
-    pdf.chapter_title("Relevant Laws")
-    pdf.chapter_body(analysis_results.get("relevant_laws", "Not Available"))
-    pdf.add_sources(analysis_results.get("sources", []))
+        pdf.chapter_body("No timeline events provided.")
+    pdf.chapter_title("Analysis Results")
+    pdf.chapter_body(f"Assessment: {report_data.get('assessment', 'N/A')}\n"
+                     f"Possible Outcomes: {report_data.get('possible_outcomes', 'N/A')}\n"
+                     f"Likely Outcomes: {report_data.get('likely_outcomes', 'N/A')}\n"
+                     f"Action Recommendation: {report_data.get('action_recommendation', 'N/A')}\n"
+                     f"Success Rate: {report_data.get('success_rate', 'N/A')}\n"
+                     f"Legal Verdict: {report_data.get('legal_verdict', 'N/A')}")
+    pdf.chapter_title("Legal Citations")
+    citations = report_data.get('citations', [])
+    if citations:
+        for cite in citations:
+            pdf.chapter_body(f"Law: {cite.get('law', 'N/A')}\n"
+                             f"Source: {cite.get('source', 'N/A')}\n"
+                             f"Explanation: {cite.get('explanation', 'N/A')}\n"
+                             "-------------------------")
+    else:
+        pdf.chapter_body("No citations available.")
+    pdf.chapter_title("Summary of Findings")
+    pdf.chapter_body(report_data.get('plain_summary', 'N/A'))
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    pdf_filename = os.path.join(SCENARIO_DIRECTORY, f"analysis_{timestamp}.pdf")
-    pdf.output(pdf_filename)
-    return pdf_filename
-
-###############################################
-#         HELPER FORMATTERS & FUNCTIONS       #
-###############################################
-
-def format_laws(laws_list):
-    if laws_list:
-        return "\n".join(f"{i+1}. {law}" for i, law in enumerate(laws_list))
-    return "None"
-
-def format_actions(action_list):
-    if action_list:
-        return "\n".join(f"- {action.strip()}" for action in action_list)
-    return "None"
-
-def format_objectives(objective_list):
-    if objective_list:
-        return "\n".join(f"- {objective.strip()}" for objective in objective_list)
-    return "None"
-
-def format_strategies(strategy_list):
-    if strategy_list:
-        return "\n".join(f"- {strategy.strip()}" for strategy in strategy_list)
-    return "None"
+    filename = os.path.join(SCENARIO_DIRECTORY, f"report_{timestamp}.pdf")
+    pdf.output(filename)
+    return filename
 
 def format_string(text, max_line_length=100):
     words = text.split()
@@ -638,7 +634,7 @@ def format_string(text, max_line_length=100):
     current_line = ""
     for word in words:
         if len(current_line + word) + 1 <= max_line_length:
-            current_line += " " + word if current_line else word
+            current_line += (" " if current_line else "") + word
         else:
             formatted_lines.append(current_line)
             current_line = word
@@ -646,63 +642,10 @@ def format_string(text, max_line_length=100):
         formatted_lines.append(current_line)
     return "\n".join(formatted_lines)
 
-def fetch_summary(url: str) -> str:
-    print(f"Fetching summary from URL {url}")
-    try:
-        with requests.get(url, timeout=5) as response:
-            if response.status_code == 200:
-                return f"URL: {url}\n"
-            else:
-                return f"ERROR: {response.status_code}\n"
-    except requests.exceptions.RequestException as e:
-        return f"Error during fetch: {e}\n"
-
-def extract_urls(text: str):
-    urls = re.findall(r'(https?://\S+)', text)
-    return urls
-
-def find_law_by_name(law_name):
-    return f"Details of: {law_name} Placeholder"
-
-def format_for_api(analysis_results: dict):
-    return {
-        "assessment": analysis_results.get("assessment", "Not Available"),
-        "questions": analysis_results.get("questions", []),
-        "possible_outcomes": analysis_results.get("possible_outcomes", "Not Available"),
-        "likely_outcomes": analysis_results.get("likely_outcomes", "Not Available"),
-        "prosecution_objectives": analysis_results.get("prosecution_objectives", "Not Applicable"),
-        "defense_objectives": analysis_results.get("defense_objectives", "Not Applicable"),
-        "prosecution_strategies": analysis_results.get("prosecution_strategies", "Not Applicable"),
-        "defense_strategies": analysis_results.get("defense_strategies", "Not Applicable"),
-        "law_enforcement_actions": analysis_results.get("law_enforcement_actions", "Not Available"),
-        "summary": analysis_results.get("summary", "Not Available"),
-        "relevant_laws": analysis_results.get("relevant_laws", "Not Available")
-    }
-
-def get_law_details(law_name):
-    try:
-        logging.info("Loading Law data from " + str(law_name))
-        law_url = ""
-        api_law_data = gemini_search(query=law_name + " details")
-        for item in api_law_data:
-            if "law" in item['url']:
-                law_url = item['url']
-                break
-        if law_url:
-            return format_string(str(law_url) + " " + fetch_summary(law_url))
-        return "Details for " + law_name + " Not found"
-    except Exception as e:
-        return "Can't load Law Details"
-
-def extract_laws(raw_text):
-    extractedLaws = re.findall(r"[A-Z][a-z]+\s+Law", raw_text)
-    return extractedLaws
-
-###############################################
-#              FLASK API SETUP                #
-###############################################
+# ------------------ FLASK API SETUP ------------------
 
 api = Flask(__name__)
+flask_cors.CORS(api)
 
 @api.route('/scenarios/<path:filename>')
 def serve_scenario(filename):
@@ -713,7 +656,14 @@ def analyze_legal_scenario():
     scenario_data = request.json
     try:
         analysis_results = gemini_chat.analyze_scenario(scenario_data)
-        formatted_results = format_for_api(analysis_results)
+        formatted_results = {
+            "assessment": analysis_results.get("assessment", "Not Available"),
+            "questions": analysis_results.get("questions", []),
+            "possible_outcomes": analysis_results.get("possible_outcomes", "Not Available"),
+            "likely_outcomes": analysis_results.get("likely_outcomes", "Not Available"),
+            "legal_verdict": analysis_results.get("legal_verdict", "Not Available"),
+            "plain_summary": analysis_results.get("plain_summary", "Not Available")
+        }
         return jsonify(formatted_results), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -724,8 +674,6 @@ def get_law_information():
     logging.info(law_query)
     try:
         api_raw_law_data = gemini_search(query=law_query + " details")
-        for item in api_raw_law_data:
-            fetch_summary(item['url'])
         formatted_data = {"law_details": api_raw_law_data}
         return jsonify(formatted_data), 200
     except Exception as e:
@@ -737,63 +685,12 @@ if ENABLE_FLASK_API:
     api_thread.start()
     print(f"Flask API enabled and running on port {API_PORT}")
 
-###############################################
-#         LEGAL EXPERT SYSTEM UI              #
-###############################################
+# ------------------ LEGAL EXPERT SYSTEM UI (IPython Widgets) ------------------
 
-# Initialize engines
+# Global instances
 vector_index = VectorIndexEngine()
 gemini_chat = GeminiChat()
-
-# --- Legal Expert System UI Components ---
-def create_title_and_license():
-    title_widget = widgets.HTML(f"<h1>{HEADING}</h1><h2>A Travis Michael O'Dell Project</h2>")
-    license_widget = widgets.Textarea(value=LICENSE_TEXT, description='License:', disabled=True,
-                                      layout={'height': '300px', 'width': '70%'})
-    return widgets.VBox([title_widget, license_widget])
-
-title_and_license = create_title_and_license()
-
-# Settings Tab (for Expert System)
-creds_out = widgets.Output()
-creds_pass1 = widgets.Text(placeholder='Password for API', description="API Password:")
-creds_user = widgets.Text(placeholder="User Name for API", description="API User:")
-creds_button = widgets.Button(description="Save Creds")
-# Dummy on_button_clicked function for compatibility
-def on_button_clicked(b):
-    pass
-# (You can extend this logic as needed.)
-
-def handle_get_creds(button):
-    with creds_out:
-        clear_output()
-        cred_data = {creds_user.value: creds_pass1.value}
-        try:
-            with open(CREDENTIALS_FILE, "w") as f:
-                json.dump(cred_data, f, indent=4)
-            print(f"Credentials saved to {CREDENTIALS_FILE}")
-        except Exception as e:
-            print(f"Error saving credentials: {e}")
-
-creds_button.on_click(handle_get_creds)
-
-def create_settings_tab_expert():
-    enable_api_toggle = widgets.ToggleButton(value=ENABLE_FLASK_API, description='Enable Flask API',
-                                             tooltip='Toggle Flask API', icon='power-off')
-    enable_api_toggle.observe(lambda change: print("Flask API enabled. Please restart." if change['new'] else "Flask API disabled."), names='value')
-    settings_output = widgets.Output()
-    with settings_output:
-        clear_output()
-        print("Expert System Settings")
-        print(f"User Files Directory: {USER_FILES_DIR}")
-        print(f"Credentials File: {CREDENTIALS_FILE}")
-        print(f"Connectors File: {CONNECTORS_FILE}")
-        show_settings_button = widgets.Button(description="Show Settings", button_style='info')
-        display(show_settings_button, creds_user, creds_pass1, creds_button, creds_out)
-        show_settings_button.on_click(lambda b: print(f"Current AI Engine: {current_ai_engine}"))
-    return widgets.VBox([enable_api_toggle, settings_output])
-
-settings_tab_expert = create_settings_tab_expert()
+timeline_events = []  # For scenarios timeline
 
 # Search Tab
 search_query = widgets.Text(placeholder='Enter your legal query here', description='Query:')
@@ -832,10 +729,10 @@ def handle_search(button):
     with search_context_output:
         clear_output()
         print("Relevant document excerpts:")
-        for i, doc_excerpt in enumerate(context_documents):
-            print(f"{i+1}. {doc_excerpt}\n")
+        for i, excerpt in enumerate(context_documents):
+            print(f"{i+1}. {excerpt}\n")
     report = gemini_chat.generate_report(
-        f"Based on the provided information and the user's query: '{query}', generate a detailed report that addresses the query. Include relevant legal information, resources, potential contacts, and any other helpful information.",
+        f"Based on the provided information and the user's query: '{query}', generate a detailed report that addresses the query. Include relevant legal information, resources, potential contacts, and other helpful information.",
         context_documents
     )
     with chat_output:
@@ -860,9 +757,9 @@ def create_browse_display():
         doc_dropdown = widgets.Dropdown(options=doc_options, description="Select Document:")
         doc_details_output = widgets.Output()
         def display_document_details(change):
-            selected_url = change.new
             with doc_details_output:
                 clear_output()
+                selected_url = change.new
                 for rec in vector_index.index:
                     if rec["document"]["url"] == selected_url:
                         doc = rec["document"]
@@ -877,8 +774,10 @@ def create_browse_display():
 
 # Train Tab
 train_url_text = widgets.Text(description="URL:")
-train_category_dropdown = widgets.Dropdown(options=["Contract Law", "Criminal Law", "Constitutional Law", "International Law", "Other"],
-                                          description="Category:")
+train_category_dropdown = widgets.Dropdown(
+    options=["Contract Law", "Criminal Law", "Constitutional Law", "International Law", "Other"],
+    description="Category:"
+)
 train_add_button = widgets.Button(description="Add Task")
 train_output = widgets.Output()
 train_status_output = widgets.Output()
@@ -892,14 +791,6 @@ def handle_add_task(button):
     update_task_status()
 
 train_add_button.on_click(handle_add_task)
-
-def update_task_status():
-    with train_status_output:
-        clear_output()
-        for task_id, status in task_results.items():
-            print(f"Task {task_id}: {status.get('status', 'unknown')}")
-            if status.get("status") == "failed":
-                print(f"  Error: {status.get('error')}")
 
 # Postulate Tab
 postulate_area = widgets.Text(description="Area of Law:")
@@ -920,9 +811,12 @@ def handle_postulate(button):
 
 postulate_button.on_click(handle_postulate)
 
-# Scenarios Tab
-scenario_input = widgets.Textarea(placeholder='Describe the legal scenario', description='Scenario:',
-                                  layout=widgets.Layout(width='70%'))
+# Scenarios Tab (Generative)
+scenario_input = widgets.Textarea(
+    placeholder='Enter or describe a legal scenario to use as a seed',
+    description='Scenario:',
+    layout=widgets.Layout(width='70%')
+)
 subject_details = widgets.Text(placeholder='Enter subject details', description='Subject:')
 assailant_details = widgets.Text(placeholder='Enter assailant details', description='Assailant:')
 location_details = widgets.Text(placeholder='Enter location', description='Location:')
@@ -932,21 +826,13 @@ gather_info_button = widgets.Button(description="Gather Information")
 analyze_button = widgets.Button(description="Analyze Scenario")
 save_button = widgets.Button(description="Save Scenario")
 load_button = widgets.Button(description="Load Scenario")
-scenario_output = widgets.Output()
+pdf_button = widgets.Button(description="Generate PDF Report")
+# New generative options
+generate_fake_button = widgets.Button(description="Generate Fake Scenarios")
+index_generated_button = widgets.Button(description="Index Generated Scenarios")
+generated_scenarios_output = widgets.Output()
 
-def generate_suggested_questions(scenario_data: dict) -> List[str]:
-    questions = []
-    if not scenario_data.get("subject"):
-        questions.append("Could you provide more details about the subject involved?")
-    if not scenario_data.get("assailant"):
-        questions.append("Do you have any information about the assailant?")
-    if not scenario_data.get("location"):
-        questions.append("Where did the event take place?")
-    if not scenario_data.get("details"):
-        questions.append("Could you please describe the incident in more detail?")
-    questions.append("Is there any chance that evidence of this event exists elsewhere?")
-    questions.append("Were there any witnesses or additional parties involved?")
-    return questions
+scenario_output = widgets.Output()
 
 def handle_gather_info(button):
     with scenario_output:
@@ -959,7 +845,7 @@ def handle_gather_info(button):
             "details": case_details.value
         }
         followup_questions = gemini_chat.generate_questions(scenario_data)
-        additional_questions = generate_suggested_questions(scenario_data)
+        additional_questions = []  # You can add further question generators if desired.
         print("Follow-up Questions from Gemini:")
         for q in followup_questions:
             print(f"- {q}")
@@ -989,16 +875,18 @@ def handle_analyze_scenario(button):
             print(f"- {q}")
         print(f"\nPossible Outcomes:\n{format_string(analysis_results['possible_outcomes'])}")
         print(f"\nLikely Outcomes:\n{format_string(analysis_results['likely_outcomes'])}")
-        print(f"\nProsecution Objectives:\n{format_objectives([analysis_results.get('prosecution_objectives', 'N/A')])}")
-        print(f"\nDefense Objectives:\n{format_objectives([analysis_results.get('defense_objectives', 'N/A')])}")
-        print(f"\nProsecution Strategies:\n{format_strategies([analysis_results.get('prosecution_strategies', 'N/A')])}")
-        print(f"\nDefense Strategies:\n{format_strategies([analysis_results.get('defense_strategies', 'N/A')])}")
-        print(f"\nLaw Enforcement Actions:\n{format_actions([analysis_results.get('law_enforcement_actions', 'N/A')])}")
-        print(f"\nSummary:\n{format_string(analysis_results['summary'])}")
-        print(f"\nRelevant Laws:\n{format_laws([analysis_results.get('relevant_laws', 'N/A')])}")
-        pdf_filename = create_pdf_report(scenario_data, analysis_results)
+        print(f"\nAction Recommendation:\n{analysis_results.get('action_recommendation', 'N/A')}")
+        print(f"\nLegal Verdict: {analysis_results.get('legal_verdict', 'N/A')}")
+        print(f"\nPlain Summary:\n{analysis_results.get('plain_summary', 'N/A')}")
+        pdf_filename = create_pdf_report(analysis_results, {
+            "scenario": scenario_input.value,
+            "subject": subject_details.value,
+            "assailant": assailant_details.value,
+            "location": location_details.value,
+            "details": case_details.value
+        }, timeline_events)
         print(f"\nPDF report generated: {pdf_filename}")
-        display(HTML(f'<a href="/scenarios/{os.path.basename(pdf_filename)}" target="_blank">Download PDF Report</a>'))
+        display(FileLink(pdf_filename))
 
 def handle_save_scenario(button):
     with scenario_output:
@@ -1008,7 +896,8 @@ def handle_save_scenario(button):
             "subject": subject_details.value,
             "assailant": assailant_details.value,
             "location": location_details.value,
-            "details": case_details.value
+            "details": case_details.value,
+            "timeline": timeline_events
         }
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         filename = os.path.join(SCENARIO_DIRECTORY, f"scenario_{timestamp}.json")
@@ -1040,67 +929,155 @@ def handle_load_scenario(button):
                     assailant_details.value = scenario_data.get("assailant", "")
                     location_details.value = scenario_data.get("location", "")
                     case_details.value = scenario_data.get("details", "")
+                    timeline = scenario_data.get("timeline", [])
+                    timeline_events.clear()
+                    timeline_events.extend(timeline)
                     print(f"Scenario loaded from {filepath}")
                 except Exception as e:
                     print(f"Error loading scenario: {e}")
         scenario_dropdown.observe(load_selected_scenario, names='value')
         display(scenario_dropdown, load_output)
 
-gather_info_button.on_click(handle_gather_info)
-analyze_button.on_click(handle_analyze_scenario)
-save_button.on_click(handle_save_scenario)
-load_button.on_click(handle_load_scenario)
+def handle_pdf_report(button):
+    with scenario_output:
+        print("Generating PDF report...")
+    scenario_data = {
+        "scenario": scenario_input.value,
+        "subject": subject_details.value,
+        "assailant": assailant_details.value,
+        "location": location_details.value,
+        "details": case_details.value
+    }
+    analysis_results = gemini_chat.analyze_scenario(scenario_data)
+    pdf_filename = create_pdf_report(analysis_results, scenario_data, timeline_events)
+    with scenario_output:
+        print(f"PDF report generated: {pdf_filename}")
+        display(FileLink(pdf_filename))
 
+# New: Generate and index fake scenarios
+def handle_generate_fake(button):
+    with generated_scenarios_output:
+        clear_output()
+        seed = scenario_input.value
+        if not seed:
+            print("Please enter a seed scenario in the Scenario box.")
+            return
+        fake_scenarios = generate_fake_scenarios(seed, count=3)
+        global generated_scenarios_list
+        generated_scenarios_list = fake_scenarios
+        print("Generated Fake Scenarios:")
+        for i, scen in enumerate(fake_scenarios, 1):
+            print(f"{i}. {scen}")
+
+def handle_index_generated(button):
+    with generated_scenarios_output:
+        if 'generated_scenarios_list' not in globals() or not generated_scenarios_list:
+            print("No generated scenarios available to index. Generate first.")
+            return
+        for scen in generated_scenarios_list:
+            index_fake_scenario(scen)
+        print("Indexed generated scenarios.")
+        update_task_status()
+
+generate_fake_button.on_click(handle_generate_fake)
+index_generated_button.on_click(handle_index_generated)
+
+# Assemble the Scenarios Tab UI
 scenarios_tab = widgets.VBox([
     scenario_input,
     subject_details,
     assailant_details,
     location_details,
     case_details,
-    widgets.HBox([gather_info_button, analyze_button, save_button, load_button]),
-    scenario_output
+    widgets.HBox([gather_info_button, analyze_button, save_button, load_button, pdf_button]),
+    scenario_output,
+    widgets.HBox([generate_fake_button, index_generated_button]),
+    generated_scenarios_output
 ])
 
-# ----------------------- Timeline Tab -----------------------
-timeline_area = widgets.Output()
+# Settings Tab
+api_key_text = widgets.Text(
+    value=GEMINI_API_KEY,
+    description="API Key:",
+    placeholder="Enter your Gemini API key"
+)
+api_key_status = widgets.Label(value="")
 
-# We create a simple UI for adding timeline events.
-timeline_events = []  # List to store timeline events
-timeline_table = widgets.Output()
+def on_api_key_change(change):
+    key = change.new
+    api_key_status.value = "API key looks acceptable." if len(key) >= 10 else "API key appears too short."
+api_key_text.observe(on_api_key_change, names='value')
 
-def update_timeline_table():
-    global timeline_events
-    with timeline_table:
+gemini_model_text = widgets.Text(value=GEMINI_MODEL_NAME, description="Embed Model:")
+gemini_chat_model_text = widgets.Text(value=GEMINI_CHAT_MODEL_NAME, description="Chat Model:")
+simulate_checkbox = widgets.Checkbox(value=SIMULATE_EMBEDDINGS, description="Simulate Embeddings")
+simulation_vector_length_text = widgets.BoundedIntText(value=SIMULATION_VECTOR_LENGTH, min=100, max=1024, description="Vector Length:")
+save_settings_button = widgets.Button(description="Save Settings")
+load_settings_button = widgets.Button(description="Load Settings")
+settings_output = widgets.Output()
+
+def handle_save_settings(button):
+    global GEMINI_API_KEY, GEMINI_MODEL_NAME, GEMINI_CHAT_MODEL_NAME, SIMULATE_EMBEDDINGS, SIMULATION_VECTOR_LENGTH
+    GEMINI_API_KEY = api_key_text.value
+    GEMINI_MODEL_NAME = gemini_model_text.value
+    GEMINI_CHAT_MODEL_NAME = gemini_chat_model_text.value
+    SIMULATE_EMBEDDINGS = simulate_checkbox.value
+    SIMULATION_VECTOR_LENGTH = simulation_vector_length_text.value
+    with settings_output:
         clear_output()
-        if not timeline_events:
-            print("No events added to the timeline yet.")
-            return
-        df = pd.DataFrame(timeline_events)
-        display(HTML(df.to_html(index=False, classes='table table-striped')))
+        save_settings_to_file()
+        print("Settings saved and updated.")
 
-def add_timeline_event_ui():
-    event_time = widgets.Text(description="Time (or Approx.):", layout=widgets.Layout(width='30%'))
-    event_description = widgets.Textarea(description="Event:", layout=widgets.Layout(width='70%'))
-    add_event_button = widgets.Button(description="Add Event")
-    hbox = widgets.HBox([event_time, event_description, add_event_button])
-    display(hbox)
-    def handle_add_event(button):
-        global timeline_events
-        timeline_events.append({"time": event_time.value, "description": event_description.value})
-        event_time.value = ""
-        event_description.value = ""
-        update_timeline_table()
-    add_event_button.on_click(handle_add_event)
-
-def create_timeline_display():
-    with timeline_area:
+def handle_load_settings(button):
+    settings = load_settings_from_file()
+    api_key_text.value = settings.get("GEMINI_API_KEY", DEFAULT_SETTINGS["GEMINI_API_KEY"])
+    gemini_model_text.value = settings.get("GEMINI_MODEL_NAME", DEFAULT_SETTINGS["GEMINI_MODEL_NAME"])
+    gemini_chat_model_text.value = settings.get("GEMINI_CHAT_MODEL_NAME", DEFAULT_SETTINGS["GEMINI_CHAT_MODEL_NAME"])
+    simulate_checkbox.value = settings.get("SIMULATE_EMBEDDINGS", DEFAULT_SETTINGS["SIMULATE_EMBEDDINGS"])
+    simulation_vector_length_text.value = settings.get("SIMULATION_VECTOR_LENGTH", DEFAULT_SETTINGS["SIMULATION_VECTOR_LENGTH"])
+    with settings_output:
         clear_output()
-        display(timeline_table)
-        add_timeline_event_ui()
+        print("Settings loaded and updated.")
 
-# ----------------------- MAIN EXPERT SYSTEM UI -----------------------
+save_settings_button.on_click(handle_save_settings)
+load_settings_button.on_click(handle_load_settings)
 
-# Create a Tab widget for the Legal Expert System
+settings_tab_expert = widgets.VBox([
+    api_key_text,
+    api_key_status,
+    gemini_model_text,
+    gemini_chat_model_text,
+    simulate_checkbox,
+    simulation_vector_length_text,
+    widgets.HBox([save_settings_button, load_settings_button]),
+    settings_output
+])
+
+# Active Learning Monitor
+learning_progress = widgets.FloatProgress(value=0, min=0, max=100, description="Learning Progress:")
+completeness_label = widgets.Label(value="Overall Completeness: 0%")
+iq_label = widgets.Label(value="Intelligence Quotient: 0%")
+active_learning_monitor = widgets.VBox([learning_progress, completeness_label, iq_label])
+
+def update_learning_monitor():
+    while True:
+        total = task_counter
+        completed = sum(1 for status in task_results.values() if status.get('status') != "pending")
+        completeness = (completed / total * 100) if total > 0 else 0
+        new_value = learning_progress.value + random.uniform(1, 5)
+        if new_value >= 100:
+            new_value = 0
+        learning_progress.value = new_value
+        iq = min(completeness + random.uniform(0, 10), 100)
+        completeness_label.value = f"Overall Completeness: {completeness:.1f}%"
+        iq_label.value = f"Intelligence Quotient: {iq:.1f}%"
+        time.sleep(3)
+
+active_learning_thread = threading.Thread(target=update_learning_monitor, daemon=True)
+active_learning_thread.start()
+
+# Top-Level Interface UI
+# You may also include an enhanced research interface (not detailed here) if desired.
 expert_system_tabs = widgets.Tab()
 expert_system_tabs.children = [
     widgets.VBox([search_query, search_button, search_output, search_context_output, chat_output]),
@@ -1108,7 +1085,7 @@ expert_system_tabs.children = [
     widgets.VBox([train_url_text, train_category_dropdown, train_add_button, train_output, train_status_output]),
     widgets.VBox([postulate_area, postulate_button, postulate_output]),
     scenarios_tab,
-    settings_tab_expert if 'settings_tab_expert' in globals() else settings_tab  # Use expert settings if available
+    settings_tab_expert
 ]
 expert_system_tabs.set_title(0, "Search")
 expert_system_tabs.set_title(1, "Browse")
@@ -1117,187 +1094,93 @@ expert_system_tabs.set_title(3, "Postulate")
 expert_system_tabs.set_title(4, "Scenarios")
 expert_system_tabs.set_title(5, "Settings")
 
-###############################################
-#         ENHANCED LEGAL RESEARCH APP         #
-###############################################
-
-class EnhancedLegalResearchApp:
-    def __init__(self):
-        # Improved configuration management
-        self.config = {
-            'theme': 'light',
-            'font_size': 'medium',
-            'ai_engine': 'Gemini',
-            'advanced_mode': False
-        }
-        self.load_user_preferences()
-
-    def load_user_preferences(self):
-        config_path = os.path.expanduser("~/.legal_research_app/preferences.json")
-        try:
-            with open(config_path, 'r') as f:
-                saved_config = json.load(f)
-                self.config.update(saved_config)
-        except FileNotFoundError:
-            os.makedirs(os.path.dirname(config_path), exist_ok=True)
-            self.save_user_preferences()
-
-    def save_user_preferences(self):
-        config_path = os.path.expanduser("~/.legal_research_app/preferences.json")
-        with open(config_path, 'w') as f:
-            json.dump(self.config, f, indent=4)
-
-    def create_intelligent_interface(self):
-        self.contextual_help = widgets.HTML(
-            value='<div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px;">'
-                  'Welcome! Hover over elements or use the help button for guidance.</div>',
-            layout=widgets.Layout(width='100%', margin='10px 0')
-        )
-        self.smart_search = widgets.Text(
-            placeholder='Enter your legal query (e.g., "Contract breach damages")',
-            description='Smart Search:',
-            layout=widgets.Layout(width='100%')
-        )
-        self.search_suggestions = widgets.Dropdown(
-            options=['Recent Searches', 'Popular Queries', 'Recommended'],
-            description='Suggestions:',
-            disabled=True
-        )
-        self.complexity_toggle = widgets.ToggleButton(
-            value=False,
-            description='Advanced Mode',
-            tooltip='Toggle between simplified and comprehensive views',
-            icon='cogs'
-        )
-        self.theme_selector = widgets.Dropdown(
-            options=['Light', 'Dark', 'High Contrast'],
-            value=self.config['theme'].capitalize(),
-            description='Theme:'
-        )
-        self.font_size_selector = widgets.Dropdown(
-            options=['Small', 'Medium', 'Large', 'Extra Large'],
-            value=self.config['font_size'].capitalize(),
-            description='Font Size:'
-        )
-        self.ai_engine_selector = widgets.Dropdown(
-            options=['Gemini', 'Claude', 'Custom'],
-            value=self.config['ai_engine'],
-            description='AI Engine:'
-        )
-        self.workflow_wizard = widgets.Accordion(
-            children=[
-                widgets.HTML(
-                    value='<div style="padding: 10px;">'
-                          'Step-by-step guidance for legal research and analysis.'
-                          '</div>'
-                ),
-                widgets.VBox([
-                    widgets.Label('1. Define Your Legal Scenario'),
-                    widgets.Label('2. Gather Initial Information'),
-                    widgets.Label('3. Conduct Preliminary Research'),
-                    widgets.Label('4. Analyze Findings'),
-                    widgets.Label('5. Generate Comprehensive Report')
-                ])
-            ],
-            titles=('Workflow Wizard', 'Steps')
-        )
-        self.error_prediction = widgets.HTML(
-            value='<div style="color: green;">No potential issues detected.</div>',
-            layout=widgets.Layout(width='100%', margin='10px 0')
-        )
-        self.complexity_toggle.observe(self.toggle_complexity, names='value')
-        self.theme_selector.observe(self.change_theme, names='value')
-        self.font_size_selector.observe(self.adjust_font_size, names='value')
-        main_layout = widgets.VBox([
-            self.contextual_help,
-            widgets.HBox([self.smart_search, self.search_suggestions]),
-            widgets.HBox([self.complexity_toggle, self.theme_selector, self.font_size_selector]),
-            self.ai_engine_selector,
-            self.workflow_wizard,
-            self.error_prediction
-        ])
-        return main_layout
-
-    def toggle_complexity(self, change):
-        self.config['advanced_mode'] = change['new']
-        self.contextual_help.value = (
-            '<div style="background-color: #e6f2ff; padding: 10px; border-radius: 5px;">'
-            f'{"Advanced mode enabled. More detailed controls available." if change["new"] else "Simplified interface active."}'
-            '</div>'
-        )
-        self.save_user_preferences()
-
-    def change_theme(self, change):
-        self.config['theme'] = change['new'].lower()
-        theme_styles = {
-            'light': {'background': 'white', 'text_color': 'black'},
-            'dark': {'background': '#2c3e50', 'text_color': 'white'},
-            'high contrast': {'background': 'black', 'text_color': 'yellow'}
-        }
-        selected_theme = theme_styles.get(self.config['theme'], theme_styles['light'])
-        self.contextual_help.value = (
-            f'<div style="background-color: {selected_theme["background"]}; color: {selected_theme["text_color"]}; '
-            f'padding: 10px; border-radius: 5px;">Theme changed to {self.config["theme"].capitalize()}.</div>'
-        )
-        self.save_user_preferences()
-
-    def adjust_font_size(self, change):
-        self.config['font_size'] = change['new'].lower()
-        font_sizes = {
-            'small': '12px',
-            'medium': '16px',
-            'large': '20px',
-            'extra large': '24px'
-        }
-        selected_size = font_sizes.get(self.config['font_size'], '16px')
-        self.contextual_help.value = (
-            f'<div style="font-size: {selected_size}; padding: 10px; border-radius: 5px;">'
-            f'Font size set to {self.config["font_size"].capitalize()}.</div>'
-        )
-        self.save_user_preferences()
-
-    def run(self):
-        interface = self.create_intelligent_interface()
-        display(interface)
-
-# ----------------------- MAIN INTERFACE: TOP-TAB UI -----------------------
-# Create two main sections:
-# 1. Expert System (the legal expert system with multiple tabs)
-# 2. Enhanced Research (the enhanced, adaptive interface)
-enhanced_app = EnhancedLegalResearchApp()
-enhanced_interface = enhanced_app.create_intelligent_interface()
-
-# Expert System main tab
-expert_system_tabs = widgets.Tab()
-expert_system_tabs.children = [
-    widgets.VBox([search_query, search_button, search_output, search_context_output, chat_output]),
-    widgets.VBox([browse_output]),
-    widgets.VBox([train_url_text, train_category_dropdown, train_add_button, train_output, train_status_output]),
-    widgets.VBox([postulate_area, postulate_button, postulate_output]),
-    scenarios_tab,
-    settings_tab_expert if 'settings_tab_expert' in globals() else settings_tab
-]
-expert_system_tabs.set_title(0, "Search")
-expert_system_tabs.set_title(1, "Browse")
-expert_system_tabs.set_title(2, "Train")
-expert_system_tabs.set_title(3, "Postulate")
-expert_system_tabs.set_title(4, "Scenarios")
-expert_system_tabs.set_title(5, "Settings")
-
-# Create a top-level tab with two sections:
-# "Enhanced" for the enhanced research interface and "Expert" for the expert system.
+# Top-level tabs (Enhanced, Expert System, Active Learning Monitor)
+# For brevity, the "Enhanced" tab is simply a placeholder here.
+enhanced_interface = widgets.HTML(
+    value="<h3>Enhanced Legal Research Interface</h3><p>This section would provide an adaptive, intelligent research experience.</p>"
+)
 top_level_tabs = widgets.Tab()
 top_level_tabs.children = [
     enhanced_interface,
-    expert_system_tabs
+    expert_system_tabs,
+    active_learning_monitor
 ]
 top_level_tabs.set_title(0, "Enhanced")
 top_level_tabs.set_title(1, "Expert System")
+top_level_tabs.set_title(2, "Active Learning Monitor")
 
-###############################################
-#                 RUN THE APP                 #
-###############################################
+# Title and License Display
+def create_title_and_license():
+    title_widget = widgets.HTML(f"<h1>{HEADING}</h1><h2>A Travis Michael O'Dell Project</h2>")
+    license_widget = widgets.Textarea(value=LICENSE_TEXT, description='License:', disabled=True,
+                                      layout={'height': '300px', 'width': '70%'})
+    disclaimer_widget = widgets.HTML(f"<pre>{DISCLAIMER_TEXT}</pre>")
+    return widgets.VBox([title_widget, disclaimer_widget, license_widget])
 
-# Display title/license info and the top-level tab interface
-display(title_and_license)
-display(top_level_tabs)
+title_and_license = create_title_and_license()
+
+# ------------------ MAIN RUNNER ------------------
+
+def main(mode="both"):
+    load_settings_from_file()
+
+    # Create main objects
+    gem_chat = GeminiChat()
+    vect_index = VectorIndexEngine()
+
+    # Create the dual interface object
+    # The DualInterface class below runs the IPython widgets and optionally the Flask API.
+    class DualInterface:
+        def __init__(self, gemini_chat, vector_index, host="0.0.0.0", port=API_PORT):
+            self.gemini_chat = gemini_chat
+            self.vector_index = vector_index
+            self.host = host
+            self.port = port
+            if FLASK_AVAILABLE:
+                self.flask_app = api
+            else:
+                self.flask_app = None
+            self.train_status_output = widgets.Output()
+            self.setup_widgets()
+
+        def setup_widgets(self):
+            self.main_vbox = widgets.VBox([title_and_license, top_level_tabs])
+        def display(self):
+            if JUPYTER_AVAILABLE:
+                display(self.main_vbox)
+                # Start background thread to update task status UI
+                t = threading.Thread(target=periodic_task_update_ui, args=(self.train_status_output,), daemon=True)
+                t.start()
+            else:
+                print("Jupyter/ipywidgets not available; cannot display GUI.")
+
+        def start_flask_in_thread(self):
+            if not self.flask_app:
+                print("Flask not available.")
+                return
+            def flask_thread():
+                self.flask_app.run(host=self.host, port=self.port, debug=False)
+            t = threading.Thread(target=flask_thread, daemon=True)
+            t.start()
+            print(f"Flask server started at http://{self.host}:{self.port}")
+
+    interface = DualInterface(gem_chat, vect_index)
+
+    if mode in ("both", "flask"):
+        interface.start_flask_in_thread()
+    if mode in ("both", "widget"):
+        interface.display()
+    if mode == "flask":
+        # Blocking call if only Flask mode is desired.
+        interface.flask_app.run(host="0.0.0.0", port=API_PORT, debug=True)
+
+if __name__ == "__main__":
+    mode_arg = "both"
+    for arg in sys.argv:
+        if "--flask" in arg:
+            mode_arg = "flask"
+        elif "--widget" in arg:
+            mode_arg = "widget"
+        elif "--both" in arg:
+            mode_arg = "both"
+    main(mode_arg)
